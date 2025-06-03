@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Email Scraper</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+        #progress-log {
+            background-color: #f3f4f6; /* gray-100 */
+            border: 1px solid #d1d5db; /* gray-300 */
+            padding: 1rem;
+            border-radius: 0.375rem; /* rounded-md */
+            height: 200px;
+            overflow-y: auto;
+            font-family: monospace;
+            font-size: 0.875rem; /* text-sm */
+            line-height: 1.25rem;
+            white-space: pre-wrap; /* Allow wrapping */
+            word-break: break-all; /* Break long words */
+        }
+        .progress-log-entry {
+            padding-bottom: 0.25rem;
+            border-bottom: 1px dashed #e5e7eb; /* gray-200 */
+            margin-bottom: 0.25rem;
+        }
+        .progress-log-entry:last-child {
+            border-bottom: none;
+            margin-bottom: 0;
+        }
+    </style>
+</head>
+<body class="bg-gray-100 text-gray-800 flex flex-col items-center justify-center min-h-screen p-4">
+
+    <div class="bg-white p-8 rounded-lg shadow-xl w-full max-w-2xl">
+        <h1 class="text-3xl font-bold mb-6 text-center text-indigo-600">Website Email Scraper</h1>
+
+        <p class="mb-6 text-sm text-gray-600">
+            Enter website URLs below (one URL per line). The scraper will visit the homepage and common pages (like 'contact' or 'about us') to find email addresses.
+            Results will be provided as a downloadable CSV file.
+        </p>
+        
+        <form id="scrapeForm">
+            <div class="mb-6">
+                <label for="urls" class="block text-sm font-medium text-gray-700 mb-2">Website URLs (one per line):</label>
+                <textarea id="urls" name="urls" rows="10" 
+                          class="w-full p-3 border border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500 transition duration-150"
+                          placeholder="http://example.com&#10;https://another-example.org"></textarea>
+            </div>
+
+            <div class="text-center">
+                <button type="submit" id="submitButton"
+                        class="bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-3 px-6 rounded-lg shadow-md hover:shadow-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-opacity-50 transition duration-150 ease-in-out transform hover:scale-105">
+                    Start Scraping
+                </button>
+            </div>
+        </form>
+
+        <div id="progressContainer" class="mt-8 hidden">
+            <h2 class="text-xl font-semibold mb-2 text-gray-700">Scraping Progress:</h2>
+            <div id="progress-log"></div> <div id="statusMessage" class="mt-2 text-sm text-gray-600"></div> <a id="downloadLink" href="#" class="hidden mt-4 inline-block bg-green-500 hover:bg-green-600 text-white font-semibold py-2 px-4 rounded-lg shadow-md transition duration-150">
+                Download Results CSV
+            </a>
+        </div>
+
+
+        <div class="mt-8 text-xs text-gray-500 text-center">
+            <p><strong>Note:</strong> Scraping can take time, especially for many URLs. Please be patient.</p>
+            <p>This tool respects a polite delay between requests. MAX_DEPTH is set to {{ MAX_DEPTH if MAX_DEPTH is defined else 1 }} (0 for homepage only, 1 for homepage + target pages).</p>
+        </div>
+    </div>
+
+    <footer class="mt-10 text-center text-xs text-gray-500">
+        <p>&copy; 2024 Email Scraper Tool. For educational purposes.</p>
+    </footer>
+
+    <script>
+        // Get references to DOM elements
+        const scrapeForm = document.getElementById('scrapeForm');
+        const submitButton = document.getElementById('submitButton');
+        const urlsTextarea = document.getElementById('urls');
+        const progressContainer = document.getElementById('progressContainer');
+        const progressLog = document.getElementById('progress-log');
+        const statusMessage = document.getElementById('statusMessage');
+        const downloadLink = document.getElementById('downloadLink');
+        let eventSource = null; // To hold the EventSource object for SSE
+
+        // Add event listener for form submission
+        scrapeForm.addEventListener('submit', async function(event) {
+            event.preventDefault(); // Prevent default form submission
+            
+            // Update UI to show processing state
+            submitButton.disabled = true;
+            submitButton.textContent = 'Processing...';
+            progressContainer.classList.remove('hidden');
+            progressLog.innerHTML = ''; // Clear previous logs
+            statusMessage.textContent = 'Initiating scraping task...';
+            downloadLink.classList.add('hidden'); // Hide download link initially
+
+            const formData = new FormData(scrapeForm); // Get form data
+
+            try {
+                // Send request to the backend to start scraping
+                const response = await fetch('/request-scrape', { // Endpoint defined in app.py
+                    method: 'POST',
+                    body: formData
+                });
+
+                if (!response.ok) {
+                    // Handle server-side errors gracefully
+                    const errorData = await response.json().catch(() => ({error: "Unknown server error while parsing error response."}));
+                    throw new Error(errorData.error || `Server error: ${response.status}`);
+                }
+
+                const data = await response.json(); // Get task ID from response
+                const taskId = data.task_id;
+
+                if (taskId) {
+                    statusMessage.textContent = `Task ${taskId} started. Waiting for progress...`;
+                    connectToProgressStream(taskId); // Connect to SSE for progress updates
+                } else {
+                    throw new Error("Failed to get Task ID from server.");
+                }
+
+            } catch (error) {
+                console.error('Error starting scrape:', error);
+                statusMessage.textContent = `Error: ${error.message}`;
+                // Reset UI on error
+                submitButton.disabled = false;
+                submitButton.textContent = 'Start Scraping';
+            }
+        });
+
+        // Function to connect to the Server-Sent Events stream
+        function connectToProgressStream(taskId) {
+            if (eventSource) {
+                eventSource.close(); // Close any existing connection
+            }
+            // Create a new EventSource connection to the progress stream endpoint
+            eventSource = new EventSource(`/progress-stream/${taskId}`);
+
+            // Handle incoming messages from the server
+            eventSource.onmessage = function(event) {
+                const message = event.data;
+                const logEntry = document.createElement('div');
+                logEntry.classList.add('progress-log-entry');
+                logEntry.textContent = message;
+                progressLog.appendChild(logEntry);
+                progressLog.scrollTop = progressLog.scrollHeight; // Auto-scroll to the bottom of the log
+
+                // Check for special messages indicating completion or error
+                if (message.startsWith('COMPLETE:')) {
+                    const filename = message.substring('COMPLETE:'.length);
+                    statusMessage.textContent = `Scraping complete! Results file: ${filename}`;
+                    downloadLink.href = `/download/${filename}`; // Set download link
+                    downloadLink.classList.remove('hidden'); // Show download link
+                    eventSource.close(); // Close the SSE connection
+                    // Reset UI
+                    submitButton.disabled = false;
+                    submitButton.textContent = 'Start New Scraping';
+                } else if (message.startsWith('ERROR:')) {
+                    const errorMessage = message.substring('ERROR:'.length);
+                    statusMessage.textContent = `Error during scraping: ${errorMessage}`;
+                    eventSource.close(); // Close the SSE connection
+                    // Reset UI
+                    submitButton.disabled = false;
+                    submitButton.textContent = 'Start New Scraping';
+                }
+            };
+
+            // Handle errors with the SSE connection
+            eventSource.onerror = function(err) {
+                console.error('EventSource failed:', err);
+                statusMessage.textContent = 'Connection to progress stream lost. Please try again or check server logs.';
+                if (eventSource) {
+                     eventSource.close();
+                }
+                // Reset UI
+                submitButton.disabled = false;
+                submitButton.textContent = 'Start Scraping';
+            };
+        }
+    </script>
+</body>
+</html>
